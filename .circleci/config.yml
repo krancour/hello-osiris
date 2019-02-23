@@ -1,0 +1,145 @@
+version: 2
+
+base-go-job: &base-go-job
+  docker:
+    - image: quay.io/deis/lightweight-docker-go:v0.5.0
+  environment:
+    SKIP_DOCKER: "true"
+  working_directory: /go/src/github.com/krancour/hello-osiris
+
+base-docker-job: &base-docker-job
+  docker:
+    - image: quay.io/deis/acr-publishing-tools:v0.1.0
+  environment:
+    SKIP_DOCKER: "true"
+  working_directory: /go/src/github.com/krancour/hello-osiris
+
+log-into-docker-registry-step: &log-into-docker-registry-step
+  name: Log into Docker Registry
+  command: docker login -u "${DOCKER_REGISTRY_USERNAME}" -p "${DOCKER_REGISTRY_PASSWORD}" ${DOCKER_REGISTRY}
+
+jobs:
+  lint:
+    <<: *base-go-job
+    steps:
+      - checkout
+      - run:
+          name: Lint Go Code
+          command: make lint
+  verify-vendored-code:
+    <<: *base-go-job
+    steps:
+      - checkout
+      - run:
+          name: Verify Vendored Code
+          command: make verify-vendored-code
+  test-unit:
+    <<: *base-go-job
+    steps:
+      - checkout
+      - run:
+          name: Run Unit Tests
+          command: make test-unit
+      - run:
+          name: Upload Coverage Report
+          command: bash <(curl -s https://codecov.io/bash)
+  build:
+    <<: *base-docker-job
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build Binaries & Docker Image
+          command: make build
+  publish-rc-images:
+    <<: *base-docker-job
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          <<: *log-into-docker-registry-step
+      - run:
+          name: Publish Release Candidate Images to Docker Hub
+          command: make push-rc
+  publish-release-images:
+    <<: *base-docker-job
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          <<: *log-into-docker-registry-step
+      - run:
+          name: Publish Release Images to Docker Hub
+          command: REL_VERSION="${CIRCLE_TAG}" make push-release
+  build-client:
+    <<: *base-go-job
+    steps:
+      - checkout
+      - run:
+          name: Build gRPC Client
+          command: make build-client
+  publish-client:
+    <<: *base-go-job
+    steps:
+      - checkout
+      - run:
+          name: Install ghr
+          command: go get -u github.com/tcnksm/ghr
+      - run:
+          name: Publish gRPC Client
+          command: GIT_FULL_SHA="${CIRCLE_SHA1}" REL_VERSION="${CIRCLE_TAG}" make publish-client
+
+base-pr-step: &base-pr-step
+  filters:
+    branches:
+      ignore: master
+
+base-master-step: &base-master-step
+  filters:
+    branches:
+      only: master
+
+base-release-step: &base-release-step
+  filters:
+    branches:
+      ignore: /.*/
+    tags:
+      only: /v[0-9]+(\.[0-9]+)*(\-.+)?/
+
+workflows:
+  version: 2
+  build-and-test-pr:
+    jobs:
+      - lint:
+          <<: *base-pr-step
+      - verify-vendored-code:
+          <<: *base-pr-step
+      - test-unit:
+          <<: *base-pr-step
+      - build:
+          <<: *base-pr-step
+      - build-client:
+          <<: *base-pr-step
+  build-and-test-master:
+    jobs:
+      - lint:
+          <<: *base-master-step
+      - verify-vendored-code:
+          <<: *base-master-step
+      - test-unit:
+          <<: *base-master-step
+      - build-client:
+          <<: *base-master-step
+      - publish-rc-images:
+          <<: *base-master-step
+          requires:
+            - lint
+            - verify-vendored-code
+            - test-unit
+            - build-client
+  release:
+    jobs:
+      - publish-release-images:
+          <<: *base-release-step
+      - publish-client:
+          <<: *base-release-step
